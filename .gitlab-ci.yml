@@ -1,0 +1,80 @@
+# Dans ce yaml il y a 3 variables qu'il faut définir sur le dépôt gitlab dans paramètres> CI-CD > Variables
+# Les variables sont $ID_RSA (type file), $SERVEUR_USER_DEV (type variable), $SERVER_IP_DEV (type variable)
+# Les autres variables sont définies à l'étape variables de ce yaml
+
+# Les étapes du CI-CD, l'ordre a son importance
+stages: 
+  - build
+  - deploy
+# Certaines variables qui vont être utilisées plus loin dans le .yml
+# Pour les utiliser, plus tard on les appelera avec le $ précédent leur nom
+variables:
+    # Numéro de version pour l'application, pour avoir un historique des versions
+    # des images dockers que l'on crée sur Gitlab
+    APP_VERSION: "0.1"
+    # $CI_REGISTRY_IMAGE est une variable globale de Gitlab
+    # comme toutes les autres qui commencent par $CI_
+    # Par exemple, ma varaiable $Tag_Image ressemblera à
+    TAG_IMAGE: $CI_REGISTRY_IMAGE:$APP_VERSION
+    # Le port qu'on expose dans le Dockerfile
+    DOCKERFILE_PORT: 3001
+    # Le port sur lequel on retrouvera l'appli sur le serveur
+    PORT: 3001
+    #Le nom du container
+    CONTAINER_NAME: apiTriABulles
+
+
+# Le nom d'une action dans mon CI CD
+build_image:
+# Que je rattache à la première étape de mon CI-CD
+# Comme c'est la première que je rattache à "build"
+# Elle devient la première action de l'étape "build"
+  stage: build
+  # L'image qui va être chargée dans le container Gitlab (Gitlab runner)
+  # pour éxécuter l'action
+  image:
+    # Kaniko est une alternative à l'image "Docker in Docker" qui, elle (DiD), peut
+    # avoir du mal à executer l'action de fabriquer une image Docker
+    # (puisqu'on est déjà dans une image Docker)
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    # Kaniko s'authentifie au dépôt Gitlab avec les variables d'environnement (VE) de Gitlab
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(echo -n ${CI_REGISTRY_USER}:${CI_REGISTRY_PASSWORD} | base64)\"}}}" > /kaniko/.docker/config.json
+    # Dans la racine du dépôt (accessible par la VE $CI_PROJECT_DIR), Kaniko va chercher
+    # le Dockerfile et avec le flag --destination va ranger l'image dans le dossier $TAG_IMAGE
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $TAG_IMAGE
+
+# Le nom d'une action dans mon CI CD
+deploy:
+  # Que je rattache à la seconde étape de mon CI-CD
+  # Comme c'est la première que je rattache à "deploy"
+  # Elle devient la première action de l'étape "deploy"
+  stage: deploy
+  # Same as Kaniko  
+  image: alpine:latest
+  script:
+    # On attribue à tous les utilisateurs les permissions de la clé SSH stockée dans $ID_RSA
+    - chmod og= $ID_RSA
+    # On installe openssh dans cette image alpine pour se connecter avec notre clé SSH à notre serveur distant
+    - apk update && apk add openssh-client
+    # On se connecte au serveur distant et on initialise depuis celui-ci la connexion à notre dépôt Gitlab
+    # StrictHostKeyChecking=no signifie qu'on ne vérifie pas que la clé SSH se trouve dans le bon dossier
+    # Tout le reste des commandes commençant par SSH veut dire qu'on travaille sur le serveur distant 
+    # RAPPEL: les variables commençant par $CI_ sont des variables d'environnement de Gitlab
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER_DEV@$SERVER_IP_DEV "docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY"
+    # On supprime le container de l'appli en ligne, s'il n'existe pas on renvoie "true" pour continuer à déployer
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER_DEV@$SERVER_IP_DEV "docker container rm -f $CONTAINER_NAME || true"
+    # ATTENTION!!!!! Ceci remettra à zéro votre environnement Docker pour les images, volumes, container hors-ligne
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER_DEV@$SERVER_IP_DEV "docker system prune -f"
+    # On récupère l'image qu'on vient de créer et stocker sur le dépôt Gitlab
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER_DEV@$SERVER_IP_DEV "docker pull $TAG_IMAGE"
+    # On lance notre image docker en spécifiant, le port, le nom du container
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $SERVER_USER_DEV@$SERVER_IP_DEV "docker run -d -p $PORT:$DOCKERFILE_PORT --name $CONTAINER_NAME $TAG_IMAGE"
+  # Si le CI-CD se termine bien, Gitlab rajoutera dans l'onglet Deploiement de votre dépôt
+  # Les environnements que l'on défini ci-dessous
+  environment:
+    name: developpement
+    # Le lien pour accéder
+    url: http://$SERVER_IP_DEV:$PORT
